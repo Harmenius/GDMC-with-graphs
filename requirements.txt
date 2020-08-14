@@ -1,0 +1,11 @@
+pygame
+numpy
+readline
+zlib
+cython
+setuptools
+configparser
+ftputil
+xlib
+pillow
+ipdb
