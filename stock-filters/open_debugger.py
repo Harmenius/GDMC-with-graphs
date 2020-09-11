@@ -53,9 +53,21 @@ class HeightInterpreter(Interpreter):
 		return 255 - (obj == materials.classicMaterials.Air.ID)[::-1].argmin()
 
 
-def center_level(level, height_map):
+def center_level(level, box):
 	"""Shift columns in level such that the surface is flat"""
-	MCInfdevOldLevel
+	new_dirname = os.path.dirname(level.filename) + "Flat"
+	new_filename = os.path.basename(level.filename)
+	from shutil import copytree, rmtree
+	rmtree(new_dirname, ignore_errors=True)
+	copytree(os.path.dirname(level.filename), new_dirname)
+	new_level = MCInfdevOldLevel(os.path.join(new_dirname, new_filename))
+	for cx, cz in box.chunkPositions:
+		c = new_level.getChunk(cx, cz)
+		for x, z in itertools.product(xrange(16), xrange(16)):
+			offset = c.HeightMap[z, x] - 128  # HeightMap coordinates are backwards
+			c.Blocks[x, z, -offset:] = c.Blocks[x, z, :offset]  # Assuming negative offset since surface is always below half
+			c.Blocks[x, z, :-offset] = new_level.materials.Bedrock.ID
+	return new_level
 
 
 def perform(level, box, options):
@@ -68,23 +80,24 @@ def perform(level, box, options):
 	"""
 	print("TIME TO DEBUG")
 
-	height_mapper = LevelColumnInterpreter(HeightInterpreter())
+	height_mapper = LevelColumnInterpreter(HeightInterpreter())  # TODO: Use Chunk.heightMap
 	height_map = height_mapper.interpret((level, box))
-	centered_level = center_level(level, height_map)
 	relief_map = calculate_relief_map(height_map)  # type: np.ndarray
-	agg_height_map = aggregate_height_per_chunk(height_map)  # type: np.ndarray
+	# agg_height_map = aggregate_height_per_chunk(height_map)  # type: np.ndarray
+	centered_level = center_level(level, box)
+
 	# set_height_with_bricks(agg_height_map, box, level)
-	build_coords = find_build_area(relief_map, height_map, level, box, n=100)
+	build_coords = find_build_area(relief_map, centered_level, box, n=100)
 	build_map = np.zeros_like(relief_map, dtype=bool)
 	build_map[build_coords] = True
 	set_height_with_bricks(100 * build_map, box, level)
 
 
 def _out_of_bounds(coord, area_shape):
-	return coord[0] < 0 \
-		   or coord[0] >= area_shape[0] \
-		   or coord[1] < 0 \
-		   or coord[1] >= area_shape[1]
+	return (coord[0] < 0 or
+			coord[0] >= area_shape[0] or
+			coord[1] < 0 or
+			coord[1] >= area_shape[1])
 
 
 def _calculate_relief_scores(relief_map):
@@ -121,18 +134,16 @@ def overlay_on_map(
 	plt.show()
 
 
-def _build_material_map(level, box, height_map, materials, search_depth, blocks_needed=1):
-	water_map = np.zeros((box.maxcx - box.mincx, box.maxcz - box.mincz), dtype=int)
+def _build_material_map(level, box, materials, search_depth, blocks_needed=1):
+	material_map = np.zeros((box.maxcx - box.mincx, box.maxcz - box.mincz), dtype=int)
 
 	for chunk_coord in box.chunkPositions:
-		map_coord = (chunk_coord[1] - box.mincx) << 4, (chunk_coord[0] - box.mincz) << 4
-		relevant_height_map = height_map[map_coord[1]:map_coord[1] + 16, map_coord[0]:map_coord[0] + 16]
 		chunk_tensor = level.getChunk(*chunk_coord).Blocks  # type:np.ndarray
-		chunk_surface_tensor = chunk_tensor[:, :,
-							   int(relevant_height_map.min()) - search_depth:int(relevant_height_map.max())]
-		chunk_surface_tensor = np.isin(chunk_surface_tensor, [m.ID for m in materials])
-		water_map[chunk_coord[1] - box.mincz, chunk_coord[0] - box.mincx] = chunk_surface_tensor.sum() >= blocks_needed
-	return water_map
+		chunk_surface_tensor = chunk_tensor[:, :, 128-search_depth:129]  # surface is expected to be centered around 128
+		chunk_material_count_tensor = np.isin(chunk_surface_tensor, [m.ID for m in materials])
+		# TODO: transpose. Maps should be indexed (x,z)
+		material_map[chunk_coord[1] - box.mincz, chunk_coord[0] - box.mincx] = chunk_material_count_tensor.sum() >= blocks_needed
+	return material_map
 
 
 def _spread_scores_over_map(
@@ -148,36 +159,36 @@ def _spread_scores_over_map(
 	return np.maximum(score_map, max_neighbour_score)
 
 
-def _calculate_water_scores(level, box, height_map):
+def _calculate_water_scores(level, box):
 	water = [level.materials.Water, level.materials.WaterActive]
 	# TODO: deal with chunk boxing in perform
 	chunk_box = box.chunkBox(level)
-	score_map = _build_material_map(level, chunk_box, height_map, water, 5, 10) * 10
+	score_map = _build_material_map(level, chunk_box, water, 5, 10) * 10
 	for i in range(10):
 		score_map = _spread_scores_over_map(score_map)
 	return score_map
 
 
-def _calculate_tree_scores(level, box, height_map):
+def _calculate_tree_scores(level, box):
 	chunk_box = box.chunkBox(level)
-	score_map = _build_material_map(level, chunk_box, height_map, [level.materials.Wood], 20, 10) * 10
+	score_map = _build_material_map(level, chunk_box, [level.materials.Wood], 20, 10) * 10
 	for i in range(10):
 		score_map = _spread_scores_over_map(score_map)
 	return score_map
 
 
-def _calculate_rock_scores(level, box, height_map):
+def _calculate_rock_scores(level, box):
 	chunk_box = box.chunkBox(level)
 	# TODO: Stone are 3 bricks below dirt, so if there is any relief, there will be Stone in a chunk
 	#    So we need another way to define the surface for Stone
-	score_map = _build_material_map(level, chunk_box, height_map, [level.materials.Stone], -5, 100) * 10
+	score_map = _build_material_map(level, chunk_box, [level.materials.Stone], -5, 100) * 10
 	for i in range(13):
 		score_map = _spread_scores_over_map(score_map, subtract=i < 3)
 	return score_map
 
 
-def _calculate_resource_scores(level, box, height_map):
-	tree_scores = _calculate_tree_scores(level, box, height_map)
+def _calculate_resource_scores(level, box):
+	tree_scores = _calculate_tree_scores(level, box)
 	return tree_scores
 
 
@@ -187,7 +198,6 @@ def _calculate_resource_scores(level, box, height_map):
 
 def find_build_area(
 		relief_map,  # type: np.ndarray
-		height_map,
 		level,
 		box,
 		n=None
@@ -206,8 +216,8 @@ def find_build_area(
 	If n is an integer, return a 2xn tuple with coordinates of the top n chunks (order not guaranteed)
 	"""
 	relief_scores = _calculate_relief_scores(relief_map)
-	water_scores = _calculate_water_scores(level, box, height_map)
-	resource_scores = _calculate_resource_scores(level, box, height_map)
+	water_scores = _calculate_water_scores(level, box)
+	resource_scores = _calculate_resource_scores(level, box)
 
 	scores = relief_scores + water_scores + resource_scores
 	scores = np.argsort(scores, axis=None)
