@@ -60,6 +60,9 @@ class ChunkInterpreter(Interpreter):
 		return self.__aggregator(column_interpretations)
 
 
+# TODO: The level probably fits in memory, especially if you take a horizontal slice (lowest surface - 10 : highest tree top)
+#  This would mean we don't need the LevelChunkInterpreter complications anymore,
+#  although splitting the level into chunks does add some nice hierarchy to the level.
 class LevelChunkInterpreter(Interpreter):
 	def __init__(
 			self,
@@ -77,6 +80,12 @@ class LevelChunkInterpreter(Interpreter):
 			chunk_interpretation = self.chunk_interpreter.interpret(chunk.Blocks)
 			output[output_position[0], output_position[1], :] = chunk_interpretation
 
+		# TODO: Don't fix failing np dimension stuff here
+		#  Removing this bit causes the output to be 3D because output_dimension is (1,)
+		#  Setting output_dimension to (,) will have the line above fail because it uses 3 indexes
+		output_dimension = self.chunk_interpreter.output_dimension
+		if len(output_dimension) == 1 and output_dimension[0] == 1:
+			output = np.reshape(output, output_shape)
 		return output
 
 	@staticmethod

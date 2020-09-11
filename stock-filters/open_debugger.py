@@ -8,7 +8,8 @@ import numpy as np
 
 from pymclevel import MCLevel, BoundingBox, MCInfdevOldLevel, materials
 
-from village_generation.interpreter.interpreter import LevelColumnInterpreter, Interpreter
+from village_generation.interpreter.interpreter import LevelColumnInterpreter, Interpreter, LevelChunkInterpreter, \
+	ChunkInterpreter, ColumnInterpreter
 
 inputs = (
 	("Open Debugger", "label"),
@@ -48,7 +49,7 @@ def aggregate_height_per_chunk(height_map):
 
 
 class HeightInterpreter(Interpreter):
-	surface_blocks = set([block.ID for block in (  # Convert to ID so we can match blocks independent of state
+	surface_blocks = [block.ID for block in (  # Convert to ID so we can match blocks independent of state
 		materials.alphaMaterials.Stone,
 		materials.alphaMaterials.Grass,
 		materials.alphaMaterials.Dirt,
@@ -74,20 +75,22 @@ class HeightInterpreter(Interpreter):
 		materials.alphaMaterials.Glowstone,
 		materials.alphaMaterials.FrostedIce,
 		materials.alphaMaterials.get('magma'),
-	)])
+	)]
 
 	def interpret(self, obj):
 		surface_height = 255 - np.isin(obj, self.surface_blocks)[::-1].argmax()
 		return surface_height
 
 
-def center_level(level, box):
+def center_level(level, box, height_map):
 	"""Shift columns in level such that the surface is flat"""
 	new_level = _clone_level(level)
 	for cx, cz in box.chunkPositions:
 		c = new_level.getChunk(cx, cz)
 		for x, z in itertools.product(xrange(16), xrange(16)):
-			offset = c.HeightMap[z, x] - 128  # HeightMap coordinates are backwards
+			x_map = (cx << 4) + x - box.minx
+			z_map = (cz << 4) + z - box.minz
+			offset = height_map[x_map, z_map] - 128
 			c.Blocks[x, z, -offset:] = c.Blocks[x, z, :offset]  # Assuming negative offset since surface is always below half
 			c.Blocks[x, z, :-offset] = new_level.materials.Bedrock.ID
 	return new_level
@@ -113,15 +116,12 @@ def perform(level, box, options):
 	"""
 	print("TIME TO DEBUG")
 
-	height_mapper = LevelColumnInterpreter(HeightInterpreter())  # TODO: Use Chunk.heightMap
-	height_map = height_mapper.interpret((level, box))
-	surface_blocks = HeightInterpreter.found_surface_blocks
-	surface_blocks = {level.materials[k]: v for k, v in surface_blocks.items()}
-	print(surface_blocks)
+	height_mapper = LevelColumnInterpreter(HeightInterpreter())
+	height_map = height_mapper.interpret((level, box)).astype(int)
 
 	relief_map = calculate_relief_map(height_map)  # type: np.ndarray
 	# agg_height_map = aggregate_height_per_chunk(height_map)  # type: np.ndarray
-	centered_level = center_level(level, box)
+	centered_level = center_level(level, box, height_map)
 
 	build_coords = find_build_area(relief_map, centered_level, box, n=100)
 	build_map = np.zeros_like(relief_map, dtype=bool)
@@ -166,7 +166,7 @@ def overlay_on_map(
 	x = coordinate_grid.col * square_size[0] + square_size[0] / 2
 	y = coordinate_grid.row * square_size[1] + square_size[1] / 2
 	v = coordinate_grid.data
-	plt.scatter(x, y, c=v, s=100, marker="+")
+	plt.scatter(x, y, c=v, s=100, marker="+", cmap="cool")
 	plt.show()
 
 
@@ -195,41 +195,26 @@ def _spread_scores_over_map(
 	return np.maximum(score_map, max_neighbour_score)
 
 
-def _calculate_water_scores(level, box):
-	water = [level.materials.Water, level.materials.WaterActive]
-	# TODO: deal with chunk boxing in perform
-	chunk_box = box.chunkBox(level)
-	score_map = _build_material_map(level, chunk_box, water, 5, 10) * 10
-	for i in range(10):
-		score_map = _spread_scores_over_map(score_map)
-	return score_map
-
-
-def _calculate_tree_scores(level, box):
-	chunk_box = box.chunkBox(level)
-	score_map = _build_material_map(level, chunk_box, [level.materials.Wood], 20, 10) * 10
-	for i in range(10):
-		score_map = _spread_scores_over_map(score_map)
-	return score_map
-
-
-def _calculate_rock_scores(level, box):
-	chunk_box = box.chunkBox(level)
-	# TODO: Stone are 3 bricks below dirt, so if there is any relief, there will be Stone in a chunk
-	#    So we need another way to define the surface for Stone
-	score_map = _build_material_map(level, chunk_box, [level.materials.Stone], -5, 100) * 10
-	for i in range(13):
-		score_map = _spread_scores_over_map(score_map, subtract=i < 3)
-	return score_map
-
-
 def _calculate_resource_scores(level, box):
 	tree_scores = _calculate_tree_scores(level, box)
-	return tree_scores
+	rock_scores = _calculate_rock_scores(level, box)
+	return np.maximum(tree_scores, rock_scores) + np.minimum(tree_scores, rock_scores)/2
 
 
-# rock_scores = _calculate_rock_scores(level, box, height_map)
-# return np.maximum(tree_scores, rock_scores) + np.minimum(tree_scores, rock_scores)/2
+class MaterialCountInterpreter(ColumnInterpreter):
+	def __init__(self, materials_to_count, search_depth, search_height=0):
+		super(MaterialCountInterpreter, self).__init__()
+		self.__materials = materials_to_count
+		self.__search_depth = search_depth
+		self.__search_height = search_height
+
+	def interpret(self, obj):
+		materials_to_count = self.__materials
+		search_depth = self.__search_depth
+		search_height = self.__search_height
+		surface_slice = obj[128 - search_depth:129 + search_height]  # surface is expected to be centered around 128
+		material_count_tensor = np.isin(surface_slice, [m.ID for m in materials_to_count])
+		return material_count_tensor.sum()
 
 
 def find_build_area(
@@ -252,16 +237,49 @@ def find_build_area(
 	If n is an integer, return a 2xn tuple with coordinates of the top n chunks (order not guaranteed)
 	"""
 	relief_scores = _calculate_relief_scores(relief_map)
+	# TODO: water scores is transposed from the original ones. How to handle?
 	water_scores = _calculate_water_scores(level, box)
 	resource_scores = _calculate_resource_scores(level, box)
 
-	scores = relief_scores + water_scores + resource_scores
+	scores = relief_scores + water_scores.T + resource_scores.T
 	scores = np.argsort(scores, axis=None)
 	if n is not None:
 		return np.unravel_index(scores[:n], relief_scores.shape)
 	# TODO: investigate: find biggest rectangle that fits within True chunks for every cutoff, find optimal point on
 	#  this curve (hopefully it is a sigmoid)
 	return scores
+
+
+def _calculate_water_scores(level, box):
+	water = [materials.alphaMaterials.Water, materials.alphaMaterials.WaterActive]
+	return _calculate_material_scores(level, box, water, 10, 5)
+
+
+def _calculate_tree_scores(level, box):
+	trees = [level.materials.Wood]
+	return _calculate_material_scores(level, box, trees, 15, 0, 3)
+
+
+def _calculate_rock_scores(level, box):
+
+	ores = (materials.alphaMaterials.GoldOre,
+			materials.alphaMaterials.IronOre,
+			materials.alphaMaterials.CoalOre)
+	return _calculate_material_scores(level, box, ores, 5, 15)
+
+
+def _calculate_material_scores(level, box, material, blocks_needed, search_depth, search_height=0):
+	def check_count(arr): return np.sum(arr) >= blocks_needed
+
+	column_scorer = MaterialCountInterpreter(material, search_depth, search_height)
+	chunk_scorer = ChunkInterpreter(column_scorer, check_count)
+	level_scorer = LevelChunkInterpreter(chunk_scorer)
+	material_scores = level_scorer.interpret((level, box))
+
+	material_scores *= 10  # Calculate closeness to trees (10 - manhattan distance)
+	for i in range(10):
+		material_scores = _spread_scores_over_map(material_scores)
+	return material_scores
 
 
 def set_height_with_bricks(agg_height_map, box, level):
