@@ -48,25 +48,58 @@ def aggregate_height_per_chunk(height_map):
 
 
 class HeightInterpreter(Interpreter):
+	surface_blocks = set([block.ID for block in (  # Convert to ID so we can match blocks independent of state
+		materials.alphaMaterials.Stone,
+		materials.alphaMaterials.Grass,
+		materials.alphaMaterials.Dirt,
+		materials.alphaMaterials.Cobblestone,
+		materials.alphaMaterials.Bedrock,
+		materials.alphaMaterials.WaterActive,
+		materials.alphaMaterials.Water,
+		materials.alphaMaterials.LavaActive,
+		materials.alphaMaterials.Lava,
+		materials.alphaMaterials.Sand,
+		materials.alphaMaterials.Gravel,
+		materials.alphaMaterials.GoldOre,
+		materials.alphaMaterials.IronOre,
+		materials.alphaMaterials.CoalOre,
+		materials.alphaMaterials.Sandstone,
+		materials.alphaMaterials.MossStone,
+		materials.alphaMaterials.DiamondOre,
+		materials.alphaMaterials.RedstoneOre,
+		materials.alphaMaterials.Ice,
+		materials.alphaMaterials.Snow,
+		materials.alphaMaterials.Clay,
+		materials.alphaMaterials.SoulSand,
+		materials.alphaMaterials.Glowstone,
+		materials.alphaMaterials.FrostedIce,
+		materials.alphaMaterials.get('magma'),
+	)])
 
 	def interpret(self, obj):
-		return 255 - (obj == materials.classicMaterials.Air.ID)[::-1].argmin()
+		surface_height = 255 - np.isin(obj, self.surface_blocks)[::-1].argmax()
+		return surface_height
 
 
 def center_level(level, box):
 	"""Shift columns in level such that the surface is flat"""
-	new_dirname = os.path.dirname(level.filename) + "Flat"
-	new_filename = os.path.basename(level.filename)
-	from shutil import copytree, rmtree
-	rmtree(new_dirname, ignore_errors=True)
-	copytree(os.path.dirname(level.filename), new_dirname)
-	new_level = MCInfdevOldLevel(os.path.join(new_dirname, new_filename))
+	new_level = _clone_level(level)
 	for cx, cz in box.chunkPositions:
 		c = new_level.getChunk(cx, cz)
 		for x, z in itertools.product(xrange(16), xrange(16)):
 			offset = c.HeightMap[z, x] - 128  # HeightMap coordinates are backwards
 			c.Blocks[x, z, -offset:] = c.Blocks[x, z, :offset]  # Assuming negative offset since surface is always below half
 			c.Blocks[x, z, :-offset] = new_level.materials.Bedrock.ID
+	return new_level
+
+
+def _clone_level(level):
+	new_dirname = os.path.dirname(level.filename) + "_Cloned"
+	new_filename = os.path.basename(level.filename)
+	from shutil import copytree, rmtree
+	rmtree(new_dirname, ignore_errors=True)
+	copytree(os.path.dirname(level.filename), new_dirname)
+	new_level = MCInfdevOldLevel(os.path.join(new_dirname, new_filename))
 	return new_level
 
 
@@ -82,11 +115,14 @@ def perform(level, box, options):
 
 	height_mapper = LevelColumnInterpreter(HeightInterpreter())  # TODO: Use Chunk.heightMap
 	height_map = height_mapper.interpret((level, box))
+	surface_blocks = HeightInterpreter.found_surface_blocks
+	surface_blocks = {level.materials[k]: v for k, v in surface_blocks.items()}
+	print(surface_blocks)
+
 	relief_map = calculate_relief_map(height_map)  # type: np.ndarray
 	# agg_height_map = aggregate_height_per_chunk(height_map)  # type: np.ndarray
 	centered_level = center_level(level, box)
 
-	# set_height_with_bricks(agg_height_map, box, level)
 	build_coords = find_build_area(relief_map, centered_level, box, n=100)
 	build_map = np.zeros_like(relief_map, dtype=bool)
 	build_map[build_coords] = True
@@ -223,6 +259,8 @@ def find_build_area(
 	scores = np.argsort(scores, axis=None)
 	if n is not None:
 		return np.unravel_index(scores[:n], relief_scores.shape)
+	# TODO: investigate: find biggest rectangle that fits within True chunks for every cutoff, find optimal point on
+	#  this curve (hopefully it is a sigmoid)
 	return scores
 
 
