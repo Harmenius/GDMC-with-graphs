@@ -1,3 +1,4 @@
+import itertools
 from abc import ABCMeta, abstractmethod
 
 import numpy as np
@@ -28,6 +29,14 @@ class ColumnInterpreter(Interpreter):
 
 
 class ChunkInterpreter(Interpreter):
+	__metaclass__ = ABCMeta
+
+	def __init__(self, output_dimension):
+		super(ChunkInterpreter, self).__init__()
+		self.output_dimension = output_dimension
+
+
+class ChunkColumnInterpreter(ChunkInterpreter):
 	def __init__(self, column_interpreter, aggregator, output_dimension=(1,)):
 		"""
 
@@ -36,6 +45,7 @@ class ChunkInterpreter(Interpreter):
 			aggregator (Callable): Aggregates the output of the column_interpreter calls
 			output_dimension (tuple): Size of aggregator output
 		"""
+		super(ChunkColumnInterpreter, self).__init__(output_dimension)
 		self.__column_interpreter = column_interpreter
 		self.__aggregator = aggregator
 		self.output_dimension = output_dimension
@@ -44,16 +54,16 @@ class ChunkInterpreter(Interpreter):
 		"""Interpret a Chunk to a single object
 
 		Args:
-			chunk (np.ndarray): 16x16x? ndarray with Block IDs
+			obj (AnvilChunk): the chunk to interpret
 
 		Returns: Output of aggregator
 		"""
-		chunk = obj
+		blocks = obj.Blocks
 		column_interpretations = []
 		for x in xrange(CHUNK_WIDTH):
 			partial_column_interpretations = []
 			for z in xrange(CHUNK_HEIGHT):
-				column = chunk[x, z, :]
+				column = blocks[x, z, :]
 				column_interpretation = self.__column_interpreter.interpret(column)
 				partial_column_interpretations.append(column_interpretation)
 			column_interpretations.append(partial_column_interpretations)
@@ -77,7 +87,7 @@ class LevelChunkInterpreter(Interpreter):
 		for chunk_position in box.chunkPositions:
 			output_position = self._to_output_position(chunk_position, box)
 			chunk = level.getChunk(*chunk_position)
-			chunk_interpretation = self.chunk_interpreter.interpret(chunk.Blocks)
+			chunk_interpretation = self.chunk_interpreter.interpret(chunk)
 			output[output_position[0], output_position[1], :] = chunk_interpretation
 
 		# TODO: Don't fix failing np dimension stuff here
@@ -97,18 +107,27 @@ class LevelChunkInterpreter(Interpreter):
 		return chunk_position[0] - box.mincx, chunk_position[1] - box.mincz
 
 
-class LevelColumnInterpreter(LevelChunkInterpreter):
-	# TODO: support multi-dimensional column interpreter output: (16,16,x)
-	def __init__(self, column_interpreter):
-		super(LevelColumnInterpreter, self).__init__(ChunkInterpreter(column_interpreter, np.asarray, (16, 16)))
+class LevelColumnInterpreter(Interpreter):
+	# TODO: support multi-dimensional output
+	def __init__(self, column_interpreter, output_length):
+		self.column_interpreter = column_interpreter
+		self.output_length = output_length
 
+	# TODO: obj should be level, box. Check how to fix with superclass
 	def interpret(self, obj):
 		level, box = obj
-		interpretation_4d = super(LevelColumnInterpreter, self).interpret(obj)
-		shape = (box.size.x, box.size.z)
-		if box.size.x * box.size.z != interpretation_4d.size:
-			shape = shape + (-1,)
-		return np.reshape(interpretation_4d, shape)
+		output = np.empty((box.size.x, box.size.z, self.output_length))
+		for cx, cz in box.chunkPositions:
+			chunk = level.getChunk(cx, cz)
+			blocks = chunk.Blocks
+			for dx, dz in itertools.product(xrange(16), xrange(16)):
+				x = (cx << 4) + dx
+				z = (cz << 4) + dz
+				out_x = x - box.minx
+				out_z = z - box.minz
+				output[out_x, out_z, :] = self.column_interpreter.interpret(blocks[dx, dz, :])
+		return output
+
 
 # TODO: most interpreters work near the surface. To make it easier to handle, let's make a Level where the surface is
 #  at the same level everywhere: shift every column with its heightmap offset from the mean. Fill with bedrock/air.

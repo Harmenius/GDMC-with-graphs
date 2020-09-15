@@ -1,15 +1,13 @@
 import itertools
 from math import ceil
 
-import utilityFunctions as utilityFunctions
-from mcplatform import *
-
 import numpy as np
 
-from pymclevel import MCLevel, BoundingBox, MCInfdevOldLevel, materials
-
+from mcplatform import *
+from pymclevel import BoundingBox, MCInfdevOldLevel, materials, AnvilChunk
+from village_generation.interpreter.convolution import Convolution, ConvolutionInterpreter
 from village_generation.interpreter.interpreter import LevelColumnInterpreter, Interpreter, LevelChunkInterpreter, \
-	ChunkInterpreter, ColumnInterpreter
+	ColumnInterpreter, ChunkInterpreter
 
 inputs = (
 	("Open Debugger", "label"),
@@ -64,6 +62,7 @@ class HeightInterpreter(Interpreter):
 		materials.alphaMaterials.GoldOre,
 		materials.alphaMaterials.IronOre,
 		materials.alphaMaterials.CoalOre,
+		materials.alphaMaterials.LapisLazuliOre,
 		materials.alphaMaterials.Sandstone,
 		materials.alphaMaterials.MossStone,
 		materials.alphaMaterials.DiamondOre,
@@ -82,18 +81,23 @@ class HeightInterpreter(Interpreter):
 		return surface_height
 
 
-def center_level(level, box, height_map):
-	"""Shift columns in level such that the surface is flat"""
-	new_level = _clone_level(level)
-	for cx, cz in box.chunkPositions:
-		c = new_level.getChunk(cx, cz)
-		for x, z in itertools.product(xrange(16), xrange(16)):
-			x_map = (cx << 4) + x - box.minx
-			z_map = (cz << 4) + z - box.minz
-			offset = height_map[x_map, z_map] - 128
-			c.Blocks[x, z, -offset:] = c.Blocks[x, z, :offset]  # Assuming negative offset since surface is always below half
-			c.Blocks[x, z, :-offset] = new_level.materials.Bedrock.ID
-	return new_level
+def center_level(level, height_map):
+	"""Shift columns in level such that the surface is flat
+
+	All blocks that fall out of the level are removed. Blocks shifted into the level are bedrock.
+
+	Args:
+		level (np.ndarray): Level-size array
+		height_map (np.ndarray): Offsets to define how much to shift each column, level width by level height
+	Returns:
+		(np.ndarray) of same shape as level with all columns (third dimension) shifted
+	"""
+	shifted_level = np.copy(level)
+	for (x, z), height in np.ndenumerate(height_map):
+		offset = level.shape[-1]/2 - height
+		shifted_level[x, z, offset:] = level[x, z, :-offset]
+		shifted_level[x, z, :offset] = materials.alphaMaterials.Bedrock.ID
+	return shifted_level
 
 
 def _clone_level(level):
@@ -106,6 +110,26 @@ def _clone_level(level):
 	return new_level
 
 
+class IdentityInterpreter(ColumnInterpreter):
+	def interpret(self, obj):
+		return obj
+
+
+def _build_level_array(level, box):
+	interpreter = LevelColumnInterpreter(IdentityInterpreter(), 256)
+	array = interpreter.interpret((level, box))
+	return array
+
+
+class ChunkHeightInterpreter(ChunkInterpreter):
+	def interpret(
+			self,
+			obj  # type:AnvilChunk
+	):
+		return obj.HeightMap
+
+
+# TODO: make level / box shape agnostic
 def perform(level, box, options):
 	"""
 
@@ -114,19 +138,35 @@ def perform(level, box, options):
 		box (BoundingBox): Box that limits where the village can be placed
 		options (dict): Options given to the Filter from MCEdit2
 	"""
-	print("TIME TO DEBUG")
+	height_mapper = LevelColumnInterpreter(HeightInterpreter(), 1)
+	surface_height_map = height_mapper.interpret((level, box)).astype(int).reshape((400,400))
 
-	height_mapper = LevelColumnInterpreter(HeightInterpreter())
-	height_map = height_mapper.interpret((level, box)).astype(int)
+	top_height_map = LevelChunkInterpreter(ChunkHeightInterpreter((16, 16))).interpret((level, box)).reshape(400, 400)
 
-	relief_map = calculate_relief_map(height_map)  # type: np.ndarray
+	relevant_box = _find_relevant_box(box, surface_height_map, top_height_map)
+	# TODO: split into build array and slice relevant
+	#  that way we can move the the functions above into a convolution
+	level_array = _build_level_array(level, relevant_box)
+	relief_map = calculate_relief_map(surface_height_map)  # type: np.ndarray
+
+	centered_level = center_level(level_array, surface_height_map)
+	build_coords = find_build_area(relief_map, centered_level, n=100)
+
+
+def _find_relevant_box(box, surface_height_map, top_height_map, max_depth=10, max_height=10):
+	height = top_height_map.max() + max_height - (surface_height_map.min() - max_depth)
+	relevant_origin = (box.origin.x, surface_height_map.min() - max_depth, box.origin.z)
+	relevant_size = (box.size.x, height, box.size.z)
+	relevant_box = BoundingBox(relevant_origin, relevant_size)
+	return relevant_box
+
+
+def not_used_for_now(level, box):
 	# agg_height_map = aggregate_height_per_chunk(height_map)  # type: np.ndarray
-	centered_level = center_level(level, box, height_map)
 
-	build_coords = find_build_area(relief_map, centered_level, box, n=100)
 	build_map = np.zeros_like(relief_map, dtype=bool)
 	build_map[build_coords] = True
-	set_height_with_bricks(100 * build_map, box, level)
+	set_chunk_height_with_bricks(100 * build_map, box, level)
 
 
 def _out_of_bounds(coord, area_shape):
@@ -136,10 +176,33 @@ def _out_of_bounds(coord, area_shape):
 			coord[1] >= area_shape[1])
 
 
+def _calculate_clear_scores(level):
+	material = [
+		# materials.alphaMaterials.Sapling.ID,
+		materials.alphaMaterials.Water.ID,
+		materials.alphaMaterials.WaterActive.ID,
+		materials.alphaMaterials.Lava.ID,
+		materials.alphaMaterials.LavaActive.ID,
+		materials.alphaMaterials.Wood.ID,
+		# materials.alphaMaterials.Leaves.ID,
+		materials.alphaMaterials.Sponge.ID,
+		materials.alphaMaterials.Cactus.ID,
+		materials.alphaMaterials.MobHead.ID,
+		# materials.alphaMaterials.AcaciaLeaves.ID,
+	]
+	counts = _calculate_material_counts(level, material, 1, 10)
+	return 10 - np.clip((counts / 5).astype(int), 0, 10)
+
+
+def _calculate_flatness_scores(relief_map, level):
+	relief_scores = _calculate_relief_scores(relief_map)
+	clear_scores = _calculate_clear_scores(level)
+	return np.minimum(relief_scores, clear_scores)
+
+
 def _calculate_relief_scores(relief_map):
 	area_map = np.zeros_like(relief_map, dtype=int)
 	cutoffs = np.sort(relief_map.flatten())
-
 	base_factor = 0.9
 	factor = 1
 	for score in range(1, 21):
@@ -170,15 +233,19 @@ def overlay_on_map(
 	plt.show()
 
 
-def _build_material_map(level, box, materials, search_depth, blocks_needed=1):
-	material_map = np.zeros((box.maxcx - box.mincx, box.maxcz - box.mincz), dtype=int)
+# TODO: not used
+def _build_material_map(level, box, material, search_depth, blocks_needed=1):
+	material_map = np.zeros((box.maxcx - box.mincx, box.maxcz - box.z), dtype=int)
 
 	for chunk_coord in box.chunkPositions:
 		chunk_tensor = level.getChunk(*chunk_coord).Blocks  # type:np.ndarray
-		chunk_surface_tensor = chunk_tensor[:, :, 128-search_depth:129]  # surface is expected to be centered around 128
-		chunk_material_count_tensor = np.isin(chunk_surface_tensor, [m.ID for m in materials])
+		# surface is expected to be centered around 128
+		chunk_surface_tensor = chunk_tensor[:, :, 128 - search_depth:129]
+		chunk_material_count_tensor = np.isin(chunk_surface_tensor, [m.ID for m in material])
 		# TODO: transpose. Maps should be indexed (x,z)
-		material_map[chunk_coord[1] - box.mincz, chunk_coord[0] - box.mincx] = chunk_material_count_tensor.sum() >= blocks_needed
+		x = chunk_coord[0] - box.mincx
+		z = chunk_coord[1] - box.z
+		material_map[z, x] = chunk_material_count_tensor.sum() >= blocks_needed
 	return material_map
 
 
@@ -195,10 +262,10 @@ def _spread_scores_over_map(
 	return np.maximum(score_map, max_neighbour_score)
 
 
-def _calculate_resource_scores(level, box):
-	tree_scores = _calculate_tree_scores(level, box)
-	rock_scores = _calculate_rock_scores(level, box)
-	return np.maximum(tree_scores, rock_scores) + np.minimum(tree_scores, rock_scores)/2
+def _calculate_resource_scores(level):
+	tree_scores = _calculate_tree_scores(level)
+	rock_scores = _calculate_rock_scores(level)
+	return np.maximum(tree_scores, rock_scores) + np.minimum(tree_scores, rock_scores) / 2
 
 
 class MaterialCountInterpreter(ColumnInterpreter):
@@ -217,17 +284,17 @@ class MaterialCountInterpreter(ColumnInterpreter):
 		return material_count_tensor.sum()
 
 
+# TODO: do on a block level or convolve a house-sized space, not per chunk
 def find_build_area(
 		relief_map,  # type: np.ndarray
-		level,
-		box,
+		level,  # type: np.ndarray
 		n=None
 ):
 	"""Find all areas where the first buildings will be made
 
 	The algorithm attributes scores to every chunk
 		- 0 - 20 for relief
-		- 0 - 15 for proximity to water
+		- 0 - 10 for proximity to water
 		- 0 - 15 for proximity to resources
 			- 0 - 10 for proximity to trees
 			- 0 - 10 for proximity to rocks
@@ -236,12 +303,12 @@ def find_build_area(
 	If n is None (default), return scores for all chunks in a grid shape
 	If n is an integer, return a 2xn tuple with coordinates of the top n chunks (order not guaranteed)
 	"""
-	relief_scores = _calculate_relief_scores(relief_map)
+	relief_scores = _calculate_flatness_scores(relief_map, level)  # TODO: make buildable score, e.g. no trees, water, etc
 	# TODO: water scores is transposed from the original ones. How to handle?
-	water_scores = _calculate_water_scores(level, box)
-	resource_scores = _calculate_resource_scores(level, box)
+	water_scores = _calculate_water_scores(level)
+	resource_scores = _calculate_resource_scores(level)
 
-	scores = relief_scores + water_scores.T + resource_scores.T
+	scores = relief_scores.T + water_scores.T + resource_scores.T
 	scores = np.argsort(scores, axis=None)
 	if n is not None:
 		return np.unravel_index(scores[:n], relief_scores.shape)
@@ -250,39 +317,70 @@ def find_build_area(
 	return scores
 
 
-def _calculate_water_scores(level, box):
-	water = [materials.alphaMaterials.Water, materials.alphaMaterials.WaterActive]
-	return _calculate_material_scores(level, box, water, 10, 5)
+def _calculate_water_scores(level):
+	water = [materials.alphaMaterials.Water.ID, materials.alphaMaterials.WaterActive.ID]
+	return _calculate_material_scores(level, water, 60, 5)
 
 
-def _calculate_tree_scores(level, box):
-	trees = [level.materials.Wood]
-	return _calculate_material_scores(level, box, trees, 15, 0, 3)
+def _calculate_tree_scores(level):
+	trees = [materials.alphaMaterials.Wood.ID]
+	return _calculate_material_scores(level, trees, 9, 0, 1)
 
 
-def _calculate_rock_scores(level, box):
+def _calculate_rock_scores(level):
+	ores = (materials.alphaMaterials.GoldOre.ID,
+			materials.alphaMaterials.IronOre.ID,
+			materials.alphaMaterials.CoalOre.ID)
+	return _calculate_material_scores(level, ores, 10, 5)  # TODO: too many chunks succeed
 
-	ores = (materials.alphaMaterials.GoldOre,
-			materials.alphaMaterials.IronOre,
-			materials.alphaMaterials.CoalOre)
-	return _calculate_material_scores(level, box, ores, 5, 15)
+
+class MaterialCountConvolution(Convolution):
+	def __init__(self, material, bounds, convolution_shape):
+		"""
+
+		Args:
+			material (Iterable[Block]): Materials to count
+			bounds (slice): Slice within column to count the materials in
+			convolution_shape: Shape of array expected as first parameter to call
+		"""
+		super(MaterialCountConvolution, self).__init__(convolution_shape)
+		self.material = material
+		self.bounds = bounds  # TODO: Is 1D now, generify to ND?
+
+	def __call__(self, arr):
+		return np.isin(arr[:, :, self.bounds], self.material).sum()
 
 
-def _calculate_material_scores(level, box, material, blocks_needed, search_depth, search_height=0):
-	def check_count(arr): return np.sum(arr) >= blocks_needed
+def _calculate_material_scores(level, material, blocks_needed, search_depth, search_height=0):
+	material_scores = _calculate_material_counts(level, material, search_depth, search_height)
+	material_scores = np.greater_equal(material_scores, blocks_needed)
 
-	column_scorer = MaterialCountInterpreter(material, search_depth, search_height)
-	chunk_scorer = ChunkInterpreter(column_scorer, check_count)
-	level_scorer = LevelChunkInterpreter(chunk_scorer)
-	material_scores = level_scorer.interpret((level, box))
-
-	material_scores *= 10  # Calculate closeness to trees (10 - manhattan distance)
+	material_scores = material_scores.astype(int) * 10  # Calculate closeness to trees (10 - manhattan distance)
 	for i in range(10):
 		material_scores = _spread_scores_over_map(material_scores)
 	return material_scores
 
 
-def set_height_with_bricks(agg_height_map, box, level):
+def _calculate_material_counts(level, material, search_depth, search_height):
+	level_height = level.shape[2]
+	search_bounds = slice(level_height / 2 - search_depth,
+						  level_height / 2 + 1 + search_height)  # TODO: handle odd level_height
+	material_count_convolution = MaterialCountConvolution(material, search_bounds, (16, 16, level.shape[2]))
+	count_interpreter = ConvolutionInterpreter(material_count_convolution, (16, 16, 1))
+	material_scores = count_interpreter.interpret(level)
+	return material_scores
+
+
+def set_column_height_with_bricks(
+		height_map,  # type: np.ndarray
+		box, level):
+	for (x, z), v in np.ndenumerate(height_map):
+		x, z = x + box.minx, z + box.minz
+		level.setBlockAt(x, v, z, level.materials.Brick.ID)
+		level.setBlockDataAt(x, v, z, 0)
+
+
+def set_chunk_height_with_bricks(agg_height_map, box, level):
 	for xc, zc in itertools.product(xrange(agg_height_map.shape[0]), xrange(agg_height_map.shape[1])):
 		y = int(agg_height_map[xc, zc])
 		xc, zc = (xc << 4) + box.minx, (zc << 4) + box.minz
