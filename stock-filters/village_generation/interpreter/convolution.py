@@ -17,6 +17,15 @@ class Convolution:
 		pass
 
 
+class FunctionConvolution(Convolution):
+	def __init__(self, function, convolution_shape):
+		super(FunctionConvolution, self).__init__(convolution_shape)
+		self.function = function
+
+	def __call__(self, arr):
+		return self.function(arr)
+
+
 class ConvolutionInterpreter(Interpreter):
 	def __init__(self, convolution, step_size=None):
 		"""

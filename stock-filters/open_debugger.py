@@ -5,7 +5,7 @@ import numpy as np
 
 from mcplatform import *
 from pymclevel import BoundingBox, MCInfdevOldLevel, materials, AnvilChunk
-from village_generation.interpreter.convolution import Convolution, ConvolutionInterpreter
+from village_generation.interpreter.convolution import Convolution, ConvolutionInterpreter, FunctionConvolution
 from village_generation.interpreter.interpreter import LevelColumnInterpreter, Interpreter, LevelChunkInterpreter, \
 	ColumnInterpreter, ChunkInterpreter
 
@@ -16,8 +16,9 @@ inputs = (
 
 
 def calculate_relief_map(height_map, r=16):
-	"""Create a map to represent variance in terrain height per 10x10 chunk
+	"""Create a map to represent variance in terrain height per rxr area
 
+	h is the height (3rd dimension) of height_map
 	Args:
 		height_map (np.ndarray): The terrain heights
 		r (int): The chunk width and height
@@ -25,25 +26,12 @@ def calculate_relief_map(height_map, r=16):
 	Returns (np.ndarray):
 
 	"""
-	# TODO: Rewrite to iterate over chunks, not r
-	width, length = height_map.shape
-	relief_map = np.zeros((int(ceil(width / float(r))), int(ceil(length / float(r)))))
-	for x in range(0, width, r):
-		for y in range(0, length, r):
-			chunk = height_map[x:x + r, y:y + r]  # type:np.ndarray
-			relief_map[int(x / r), int(y / r)] = chunk.std()
-	return relief_map
+	return aggregate_height_per_chunk(height_map, np.std, r)
 
 
-def aggregate_height_per_chunk(height_map):
-	r = 16
-	width, length = height_map.shape
-	agg_height_map = np.zeros((int(ceil(width / float(r))), int(ceil(length / float(r)))))
-	for x in range(0, width, r):
-		for y in range(0, length, r):
-			chunk = height_map[x:x + r, y:y + r]  # type:np.ndarray
-			agg_height_map[int(x / r), int(y / r)] = chunk.mean()
-	return agg_height_map
+def aggregate_height_per_chunk(height_map, aggregator=np.mean, r=16):
+	c = FunctionConvolution(aggregator, (r, r))
+	return ConvolutionInterpreter(c, (r,r)).interpret(height_map)
 
 
 class HeightInterpreter(Interpreter):
@@ -152,6 +140,12 @@ def perform(level, box, options):
 	centered_level = center_level(level_array, surface_height_map)
 	build_coords = find_build_area(relief_map, centered_level, n=100)
 
+	# agg_height_map = aggregate_height_per_chunk(height_map)  # type: np.ndarray
+
+	build_map = np.zeros_like(relief_map, dtype=bool)
+	build_map[build_coords] = True
+	set_chunk_height_with_bricks(100 * build_map, box, level)
+
 
 def _find_relevant_box(box, surface_height_map, top_height_map, max_depth=10, max_height=10):
 	height = top_height_map.max() + max_height - (surface_height_map.min() - max_depth)
@@ -159,14 +153,6 @@ def _find_relevant_box(box, surface_height_map, top_height_map, max_depth=10, ma
 	relevant_size = (box.size.x, height, box.size.z)
 	relevant_box = BoundingBox(relevant_origin, relevant_size)
 	return relevant_box
-
-
-def not_used_for_now(level, box):
-	# agg_height_map = aggregate_height_per_chunk(height_map)  # type: np.ndarray
-
-	build_map = np.zeros_like(relief_map, dtype=bool)
-	build_map[build_coords] = True
-	set_chunk_height_with_bricks(100 * build_map, box, level)
 
 
 def _out_of_bounds(coord, area_shape):
