@@ -1,5 +1,4 @@
 import itertools
-from math import ceil
 
 import numpy as np
 
@@ -10,7 +9,7 @@ from village_generation.interpreter.interpreter import LevelColumnInterpreter, I
 	ColumnInterpreter, ChunkInterpreter
 
 inputs = (
-	("Open Debugger", "label"),
+	("Interpret Level", "label"),
 	("Creator: Pluralis", "label"),
 )
 
@@ -164,17 +163,15 @@ def _out_of_bounds(coord, area_shape):
 
 def _calculate_clear_scores(level):
 	material = [
-		# materials.alphaMaterials.Sapling.ID,
+		materials.alphaMaterials.Sapling.ID,
 		materials.alphaMaterials.Water.ID,
 		materials.alphaMaterials.WaterActive.ID,
 		materials.alphaMaterials.Lava.ID,
 		materials.alphaMaterials.LavaActive.ID,
 		materials.alphaMaterials.Wood.ID,
-		# materials.alphaMaterials.Leaves.ID,
 		materials.alphaMaterials.Sponge.ID,
 		materials.alphaMaterials.Cactus.ID,
 		materials.alphaMaterials.MobHead.ID,
-		# materials.alphaMaterials.AcaciaLeaves.ID,
 	]
 	counts = _calculate_material_counts(level, material, 1, 10)
 	return 10 - np.clip((counts / 5).astype(int), 0, 10)
@@ -291,6 +288,8 @@ def find_build_area(
 	"""
 	relief_scores = _calculate_flatness_scores(relief_map, level)  # TODO: make buildable score, e.g. no trees, water, etc
 	# TODO: water scores is transposed from the original ones. How to handle?
+	# TODO: Bonus points for rivers and lakes (connected body of water of at least X squares)
+	# TODO: Extra bonus points if rivers and lakes hit the or multiple edges (trade route)
 	water_scores = _calculate_water_scores(level)
 	resource_scores = _calculate_resource_scores(level)
 
@@ -317,7 +316,7 @@ def _calculate_rock_scores(level):
 	ores = (materials.alphaMaterials.GoldOre.ID,
 			materials.alphaMaterials.IronOre.ID,
 			materials.alphaMaterials.CoalOre.ID)
-	return _calculate_material_scores(level, ores, 10, 5)  # TODO: too many chunks succeed
+	return _calculate_material_scores(level, ores, 10, 5)
 
 
 class MaterialCountConvolution(Convolution):
