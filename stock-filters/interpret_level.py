@@ -1,6 +1,8 @@
 import itertools
 
+import dill as dill
 import numpy as np
+from typing import Tuple, List
 
 from mcplatform import *
 from pymclevel import BoundingBox, MCInfdevOldLevel, materials, AnvilChunk
@@ -116,6 +118,59 @@ class ChunkHeightInterpreter(ChunkInterpreter):
 		return obj.HeightMap
 
 
+def _neighbor_coords(
+		coord  # type: Tuple[int, int]
+):
+	coords = []
+	for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+		coords.append((coord[0] + dx, coord[1] + dy))
+	return coords
+
+
+def within(coord, shape):
+	return all(0 <= c < s for c, s in zip(coord, shape))
+
+
+def get_all_connected(group_i, i, unvisited, build_map, build_coords):
+	group = [i]  # type: List[int]
+	coord = build_coords[i]
+	neighbors = _neighbor_coords(coord)
+	for neighbor in neighbors:
+		if not within(neighbor, build_map.shape):
+			continue
+		neighbor_i = build_map[neighbor[0], neighbor[1]]
+		if neighbor_i in unvisited:
+			unvisited.remove(neighbor_i)
+			group.extend(get_all_connected(group_i, neighbor_i, unvisited, build_map, build_coords))
+	return group
+
+
+def find_largest_buildable_area(
+		relief_map,  # type: np.array
+		build_coords,  # type: Tuple[np.array, np.array]
+):
+	build_coords = zip(*build_coords)  # type: List[Tuple[int, int]]
+	build_map = np.zeros_like(relief_map, dtype=int) - 1  # -1 unbuildable
+	n = len(build_coords)
+	for i, (x, y) in enumerate(build_coords):
+		build_map[x, y] = i  # TODO: revert y/x?
+
+	unvisited = set(range(n))
+	groups = []  # type: List[List[int]]
+	group_i = 0
+	while unvisited:
+		i = unvisited.pop()
+		groups.append(get_all_connected(group_i, i, unvisited, build_map, build_coords))
+		group_i += 1
+
+	biggest_group = max(groups, key=len)
+	group_map = np.zeros_like(build_map, dtype=bool)
+	for i in biggest_group:
+		group_map[build_coords[i]] = 1
+
+	return group_map
+
+
 # TODO: make level / box shape agnostic
 def perform(level, box, options):
 	"""
@@ -125,6 +180,7 @@ def perform(level, box, options):
 		box (BoundingBox): Box that limits where the village can be placed
 		options (dict): Options given to the Filter from MCEdit2
 	"""
+	# TODO: Move into _perform by using level_array in stead of level
 	height_mapper = LevelColumnInterpreter(HeightInterpreter(), 1)
 	surface_height_map = height_mapper.interpret((level, box)).astype(int).reshape((400,400))
 
@@ -134,16 +190,21 @@ def perform(level, box, options):
 	# TODO: split into build array and slice relevant
 	#  that way we can move the the functions above into a convolution
 	level_array = _build_level_array(level, relevant_box)
+
+	build_map = _perform(level_array, surface_height_map)
+
+	set_chunk_height_with_bricks(100 * build_map, box, level)
+
+
+def _perform(level_array, surface_height_map):
 	relief_map = calculate_relief_map(surface_height_map)  # type: np.ndarray
-
 	centered_level = center_level(level_array, surface_height_map)
-	build_coords = find_build_area(relief_map, centered_level, n=100)
-
+	build_coords = find_buildable_area(relief_map, centered_level, n=100)
+	village_area = find_largest_buildable_area(relief_map, build_coords)
 	# agg_height_map = aggregate_height_per_chunk(height_map)  # type: np.ndarray
-
 	build_map = np.zeros_like(relief_map, dtype=bool)
 	build_map[build_coords] = True
-	set_chunk_height_with_bricks(100 * build_map, box, level)
+	return build_map
 
 
 def _find_relevant_box(box, surface_height_map, top_height_map, max_depth=10, max_height=10):
@@ -268,7 +329,7 @@ class MaterialCountInterpreter(ColumnInterpreter):
 
 
 # TODO: do on a block level or convolve a house-sized space, not per chunk
-def find_build_area(
+def find_buildable_area(
 		relief_map,  # type: np.ndarray
 		level,  # type: np.ndarray
 		n=None
@@ -373,3 +434,18 @@ def set_chunk_height_with_bricks(agg_height_map, box, level):
 			for z in range(16):
 				level.setBlockAt(xc + x, y, zc + z, level.materials.Brick.ID)
 				level.setBlockDataAt(xc + x, y, zc + z, 0)
+
+
+def store_level(level_array, surface_height_map, name="level"):
+	d = {"level_array": level_array, "surface_height_map": surface_height_map}
+	dill.dump(d, open(name+".pickle", "wb"))
+
+
+def load_level(name="level"):
+	d = dill.load(open(name+".pickle", "rb"))
+	return d["level_array"], d["surface_height_map"]
+
+
+if __name__ == '__main__':
+	level_array, surface_height_map = load_level()
+	build_map = _perform(level_array, surface_height_map)
