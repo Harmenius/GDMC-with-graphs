@@ -9,6 +9,7 @@ from pymclevel import BoundingBox, MCInfdevOldLevel, materials, AnvilChunk
 from village_generation.interpreter.convolution import Convolution, ConvolutionInterpreter, FunctionConvolution
 from village_generation.interpreter.interpreter import LevelColumnInterpreter, Interpreter, LevelChunkInterpreter, \
 	ColumnInterpreter, ChunkInterpreter
+from create_house import fill_with_houses
 
 inputs = (
 	("Interpret Level", "label"),
@@ -192,6 +193,7 @@ def perform(level, box, options):
 	level_array = _build_level_array(level, relevant_box)
 
 	build_map = _perform(level_array, surface_height_map)
+	fill_with_houses(level, box, options, build_map, surface_height_map)
 
 	set_chunk_height_with_bricks(100 * build_map, box, level)
 
@@ -202,9 +204,9 @@ def _perform(level_array, surface_height_map):
 	build_coords = find_buildable_area(relief_map, centered_level, n=100)
 	village_area = find_largest_buildable_area(relief_map, build_coords)
 	# agg_height_map = aggregate_height_per_chunk(height_map)  # type: np.ndarray
-	build_map = np.zeros_like(relief_map, dtype=bool)
-	build_map[build_coords] = True
-	return build_map
+	# build_map = np.zeros_like(relief_map, dtype=bool)
+	# build_map[build_coords] = True
+	return village_area
 
 
 def _find_relevant_box(box, surface_height_map, top_height_map, max_depth=10, max_height=10):
