@@ -38,7 +38,18 @@ def aggregate_height_per_chunk(height_map, aggregator=np.mean, r=16):
 
 
 class HeightInterpreter(Interpreter):
-	surface_blocks = [block.ID for block in (  # Convert to ID so we can match blocks independent of state
+	target_blocks = None
+
+	def interpret(self, level):
+		# type: (np.ndarray) -> np.ndarray
+		"""Transform an XxZxY tensor into an XxZ tensor with values 0-255 indicating the height of the highest block of
+		type target_blocks of that column in the level"""
+		surface_height = np.subtract(255, np.isin(level, self.target_blocks)[:, :, ::-1].argmax(2))
+		return surface_height
+
+
+class SurfaceHeightInterpreter(HeightInterpreter):
+	target_blocks = [block.ID for block in (  # Convert to ID so we can match blocks independent of state
 		materials.alphaMaterials.Stone,
 		materials.alphaMaterials.Grass,
 		materials.alphaMaterials.Dirt,
@@ -67,10 +78,13 @@ class HeightInterpreter(Interpreter):
 		materials.alphaMaterials.get('magma'),
 	)]
 
+
+class TopHeightInterpreter(HeightInterpreter):
 	def interpret(self, level):
 		# type: (np.ndarray) -> np.ndarray
-		"""Transform an XxZxY tensor into an XxZ tensor with 0-255 indicating the height of that column in the level"""
-		surface_height = np.subtract(255, np.isin(level, self.surface_blocks)[:, :, ::-1].argmax(2))
+		"""Transform an XxZxY tensor into an XxZ tensor with values 0-255 indicating the height of the highest block
+		not of type Air of that column in the level"""
+		surface_height = np.subtract(255, (level != materials.alphaMaterials.Air.ID)[:, :, ::-1].argmax(2))
 		return surface_height
 
 
@@ -176,8 +190,6 @@ def perform(level, box, options):
 	"""
 	level_array = _build_level_array(level, box)
 
-	# relevant_box = _find_relevant_box(box, surface_height_map, top_height_map)
-
 	build_map, surface_height_map = _perform(level_array)
 
 	fill_with_houses(level, box, options, build_map, surface_height_map)
@@ -185,24 +197,28 @@ def perform(level, box, options):
 
 
 def _perform(level_array):
-	# TODO: slice level using _find_relevant_box for performance gains
-	surface_height_map = HeightInterpreter().interpret(level_array)
+	# type: (np.ndarray) -> (np.ndarray, np.ndarray)
+	surface_height_map = SurfaceHeightInterpreter().interpret(level_array)
 	relief_map = calculate_relief_map(surface_height_map)  # type: np.ndarray
 	centered_level = center_level(level_array, surface_height_map)
-	build_coords = find_buildable_area(relief_map, centered_level, n=100)
+	top_height = TopHeightInterpreter().interpret(centered_level).max()
+	sliced_level = _slice_relevant_level(centered_level, top_height)
+	build_coords = find_buildable_area(relief_map, sliced_level, n=100)
 	village_area = find_largest_buildable_area(relief_map, build_coords)
-	# agg_height_map = aggregate_height_per_chunk(height_map)  # type: np.ndarray
-	# build_map = np.zeros_like(relief_map, dtype=bool)
-	# build_map[build_coords] = True
 	return village_area, surface_height_map
 
 
-def _find_relevant_box(box, surface_height_map, top_height_map, pad_depth=10, pad_height=10):
-	height = top_height_map.max() + pad_height - (surface_height_map.min() - pad_depth)
-	relevant_origin = (box.origin.x, surface_height_map.min() - pad_depth, box.origin.z)
-	relevant_size = (box.size.x, height, box.size.z)
-	relevant_box = BoundingBox(relevant_origin, relevant_size)
-	return relevant_box
+def _slice_relevant_level(level, top_height, surface_height_map=None, pad_depth=10, pad_height=10, keep_centered=True):
+	# type: (np.ndarray, int, np.ndarray, int, int, bool) -> np.ndarray
+	if surface_height_map is None:
+		surface_height = level.shape[2] // 2
+	else:
+		surface_height = surface_height_map.min()
+	if keep_centered:
+		depth = surface_height - (top_height - surface_height) - pad_depth
+	else:
+		depth = surface_height - pad_depth
+	return level[:, :, depth: top_height + pad_height]
 
 
 def _out_of_bounds(coord, area_shape):
@@ -367,6 +383,8 @@ def _calculate_material_scores(level, material, blocks_needed, search_depth, sea
 
 
 def _calculate_material_counts(level, material, search_depth, search_height):
+	# TODO: Assumes centered level so _perform has to center sliced_level, making it almost twice as big
+	#  make this not assume centered and revert level slicer
 	level_height = level.shape[2]
 	search_bounds = slice(level_height / 2 - search_depth,
 						  level_height / 2 + 1 + search_height)  # TODO: handle odd level_height
