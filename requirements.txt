@@ -9,3 +9,5 @@ ftputil
 xlib
 pillow
 ipdb
+typing
+dill
