@@ -1,9 +1,15 @@
+"""A convolution is a function applied to a moving window over a tensor (n-dimensional matrix).
+A convolution in turn produces another tensor of possible another dimension.
+Convolutions can be used to interpret a tensor. Take a 3D minecraft level. A convolution might be used to scan the
+level for water-related blocks, indicating with True or False if a 3x3x256 cuboid contains enough water blocks.
+Another convolution may then be applied to that 2D output (since there is only 1 possible height to apply it to).
+For example a 32x32 square that scans if there is enough water nearby enough to build a village (say 2 True sources)."""
 import itertools
 from abc import ABCMeta, abstractmethod
 
 import numpy as np
 
-from interpreter import Interpreter
+from village_generation.interpret.interpreter import Interpreter
 
 
 class Convolution:

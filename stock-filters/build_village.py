@@ -1,92 +1,21 @@
-import itertools
-
-import dill as dill
 import numpy as np
-from typing import Tuple, List, Callable
+from typing import Tuple, List
 
 from create_house import fill_with_houses
-from mcplatform import *
 from pymclevel import BoundingBox, MCInfdevOldLevel, materials
 from village_generation.conversion.np_mc import build_level_array, export_level
-from village_generation.interpreter.convolution import Convolution, ConvolutionInterpreter, FunctionConvolution
-from village_generation.interpreter.interpreter import Interpreter
+from village_generation.convolution.functions import spread_scores_over_map, calculate_relief_map, \
+	_calculate_material_counts
+from village_generation.edit_level.edit_level import set_chunk_height_with_bricks
+from village_generation.interpret.level_interpreter import SurfaceHeightInterpreter, TopHeightInterpreter
+from village_generation.support.serialisation import load_level
 
+
+displayName = "Build Village"
 inputs = (
-	("Interpret Level", "label"),
+	("Build village", "label"),
 	("Creator: Pluralis", "label"),
 )
-
-
-def calculate_relief_map(height_map, r=16):
-	# type: (np.ndarray, int) -> np.ndarray
-	"""Create a map to represent variance in terrain height per rxr area
-
-	h is the height (3rd dimension) of height_map
-	Args:
-		height_map (np.ndarray): The terrain heights
-		r (int): The chunk width and height
-
-	Returns (np.ndarray):
-
-	"""
-	return aggregate_height_per_chunk(height_map, np.std, r)
-
-
-def aggregate_height_per_chunk(height_map, aggregator=np.mean, r=16):
-	# type: (np.ndarray, Callable[[np.ndarray], int], int) -> np.ndarray
-	c = FunctionConvolution(aggregator, (r, r))
-	return ConvolutionInterpreter(c, (r, r)).interpret(height_map)
-
-
-class HeightInterpreter(Interpreter):
-	target_blocks = None
-
-	def interpret(self, level):
-		# type: (np.ndarray) -> np.ndarray
-		"""Transform an XxZxY tensor into an XxZ tensor with values 0-255 indicating the height of the highest block of
-		type target_blocks of that column in the level"""
-		surface_height = np.subtract(255, np.isin(level, self.target_blocks)[:, :, ::-1].argmax(2))
-		return surface_height
-
-
-class SurfaceHeightInterpreter(HeightInterpreter):
-	target_blocks = [block.ID for block in (  # Convert to ID so we can match blocks independent of state
-		materials.alphaMaterials.Stone,
-		materials.alphaMaterials.Grass,
-		materials.alphaMaterials.Dirt,
-		materials.alphaMaterials.Cobblestone,
-		materials.alphaMaterials.Bedrock,
-		materials.alphaMaterials.WaterActive,
-		materials.alphaMaterials.Water,
-		materials.alphaMaterials.LavaActive,
-		materials.alphaMaterials.Lava,
-		materials.alphaMaterials.Sand,
-		materials.alphaMaterials.Gravel,
-		materials.alphaMaterials.GoldOre,
-		materials.alphaMaterials.IronOre,
-		materials.alphaMaterials.CoalOre,
-		materials.alphaMaterials.LapisLazuliOre,
-		materials.alphaMaterials.Sandstone,
-		materials.alphaMaterials.MossStone,
-		materials.alphaMaterials.DiamondOre,
-		materials.alphaMaterials.RedstoneOre,
-		materials.alphaMaterials.Ice,
-		materials.alphaMaterials.Snow,
-		materials.alphaMaterials.Clay,
-		materials.alphaMaterials.SoulSand,
-		materials.alphaMaterials.Glowstone,
-		materials.alphaMaterials.FrostedIce,
-		materials.alphaMaterials.get('magma'),
-	)]
-
-
-class TopHeightInterpreter(HeightInterpreter):
-	def interpret(self, level):
-		# type: (np.ndarray) -> np.ndarray
-		"""Transform an XxZxY tensor into an XxZ tensor with values 0-255 indicating the height of the highest block
-		not of type Air of that column in the level"""
-		surface_height = np.subtract(255, (level != materials.alphaMaterials.Air.ID)[:, :, ::-1].argmax(2))
-		return surface_height
 
 
 def center_level(level, height_map):
@@ -109,17 +38,6 @@ def center_level(level, height_map):
 	return shifted_level
 
 
-def _clone_level(level):
-	# type: (MCInfdevOldLevel) -> MCInfdevOldLevel
-	new_dirname = os.path.dirname(level.filename) + "_Cloned"
-	new_filename = os.path.basename(level.filename)
-	from shutil import copytree, rmtree
-	rmtree(new_dirname, ignore_errors=True)
-	copytree(os.path.dirname(level.filename), new_dirname)
-	new_level = MCInfdevOldLevel(os.path.join(new_dirname, new_filename))
-	return new_level
-
-
 def _neighbor_coords(
 		coord  # type: Tuple[int, int]
 ):
@@ -129,7 +47,7 @@ def _neighbor_coords(
 	return coords
 
 
-def within(coord, shape):
+def _within(coord, shape):
 	return all(0 <= c < s for c, s in zip(coord, shape))
 
 
@@ -138,7 +56,7 @@ def get_all_connected(group_i, i, unvisited, build_map, build_coords):
 	coord = build_coords[i]
 	neighbors = _neighbor_coords(coord)
 	for neighbor in neighbors:
-		if not within(neighbor, build_map.shape):
+		if not _within(neighbor, build_map.shape):
 			continue
 		neighbor_i = build_map[neighbor[0], neighbor[1]]
 		if neighbor_i in unvisited:
@@ -173,13 +91,13 @@ def find_largest_buildable_area(
 	return group_map
 
 
-# TODO: make level / box shape agnostic
 def _change_level(level_array, build_map, surface_height_map):
 	# type: (np.ndarray, np.ndarray, np.ndarray) -> np.ndarray
 	level_array = fill_with_houses(level_array, build_map, surface_height_map)
 	return set_chunk_height_with_bricks(100 * build_map, level_array)
 
 
+# TODO: make level / box shape agnostic
 def perform(level, box, options):
 	"""
 
@@ -211,22 +129,16 @@ def _perform(level_array):
 
 def _slice_relevant_level(level, top_height, surface_height_map=None, pad_depth=10, pad_height=10, keep_centered=True):
 	# type: (np.ndarray, int, np.ndarray, int, int, bool) -> np.ndarray
+	"""Reduce level size by grabbing a vertical slice from the lowest surface to the highest surface plus padding"""
 	if surface_height_map is None:
 		surface_height = level.shape[2] // 2
 	else:
 		surface_height = surface_height_map.min()
-	if keep_centered:
+	if keep_centered:  # Currently required to support _calculate_material_counts, which assumes a centered level
 		depth = surface_height - (top_height - surface_height) - pad_depth
 	else:
 		depth = surface_height - pad_depth
 	return level[:, :, depth: top_height + pad_height]
-
-
-def _out_of_bounds(coord, area_shape):
-	return (coord[0] < 0 or
-			coord[0] >= area_shape[0] or
-			coord[1] < 0 or
-			coord[1] >= area_shape[1])
 
 
 def _calculate_clear_scores(level):
@@ -261,40 +173,6 @@ def _calculate_relief_scores(relief_map):
 		cutoff = cutoffs[int(len(cutoffs) * factor)]
 		area_map[relief_map <= cutoff] = score
 	return area_map
-
-
-def overlay_on_map(
-		grid  # type: np.ndarray
-):
-	image_size = 792., 792.
-	square_size = (image_size[0] / grid.shape[0],
-				   image_size[1] / grid.shape[1])
-
-	import matplotlib.pyplot as plt
-	import scipy.sparse as sps
-	img = plt.imread("SecondWorldMap.png")
-	fig, ax = plt.subplots()
-	ax.imshow(img)
-
-	coordinate_grid = sps.coo_matrix(grid)
-	x = coordinate_grid.col * square_size[0] + square_size[0] / 2
-	y = coordinate_grid.row * square_size[1] + square_size[1] / 2
-	v = coordinate_grid.data
-	plt.scatter(x, y, c=v, s=100, marker="+", cmap="cool")
-	plt.show()
-
-
-def _spread_scores_over_map(
-		score_map,  # type: np.ndarray
-		subtract=True
-):
-	neighbour_scores = np.zeros(score_map.shape + (4,))
-	neighbour_scores[1:, :, 0] = score_map[:-1, :]
-	neighbour_scores[:-1, :, 1] = score_map[1:, :]
-	neighbour_scores[:, 1:, 2] = score_map[:, :-1]
-	neighbour_scores[:, :-1, 3] = score_map[:, 1:]
-	max_neighbour_score = neighbour_scores.max(2) - subtract
-	return np.maximum(score_map, max_neighbour_score)
 
 
 def _calculate_resource_scores(level):
@@ -356,72 +234,14 @@ def _calculate_rock_scores(level):
 	return _calculate_material_scores(level, ores, 10, 5)
 
 
-class MaterialCountConvolution(Convolution):
-	def __init__(self, material, bounds, convolution_shape):
-		"""
-
-		Args:
-			material (Iterable[Block]): Materials to count
-			bounds (slice): Slice within column to count the materials in
-			convolution_shape: Shape of array expected as first parameter to call
-		"""
-		super(MaterialCountConvolution, self).__init__(convolution_shape)
-		self.material = material
-		self.bounds = bounds  # TODO: Is 1D now, generify to ND?
-
-	def __call__(self, arr):
-		return np.isin(arr[:, :, self.bounds], self.material).sum()
-
-
 def _calculate_material_scores(level, material, blocks_needed, search_depth, search_height=0):
 	material_scores = _calculate_material_counts(level, material, search_depth, search_height)
 	material_scores = np.greater_equal(material_scores, blocks_needed)
 
 	material_scores = material_scores.astype(int) * 10  # Calculate closeness to trees (10 - manhattan distance)
 	for i in range(10):
-		material_scores = _spread_scores_over_map(material_scores)
+		material_scores = spread_scores_over_map(material_scores)
 	return material_scores
-
-
-def _calculate_material_counts(level, material, search_depth, search_height):
-	# TODO: Assumes centered level so _perform has to center sliced_level, making it almost twice as big
-	#  make this not assume centered and revert level slicer
-	level_height = level.shape[2]
-	search_bounds = slice(level_height / 2 - search_depth,
-						  level_height / 2 + 1 + search_height)  # TODO: handle odd level_height
-	material_count_convolution = MaterialCountConvolution(material, search_bounds, (16, 16, level.shape[2]))
-	count_interpreter = ConvolutionInterpreter(material_count_convolution, (16, 16, 1))
-	material_scores = count_interpreter.interpret(level)
-	return material_scores
-
-
-def set_column_height_with_bricks(
-		height_map,  # type: np.ndarray
-		box, level):
-	for (x, z), v in np.ndenumerate(height_map):
-		x, z = x + box.minx, z + box.minz
-		level.setBlockAt(x, v, z, level.materials.Brick.ID)
-		level.setBlockDataAt(x, v, z, 0)
-
-
-def set_chunk_height_with_bricks(agg_height_map, level_array):
-	# type: (np.ndarray, np.ndarray) -> np.ndarray
-	new_level_array = level_array.copy()
-	for xc, zc in itertools.product(xrange(agg_height_map.shape[0]), xrange(agg_height_map.shape[1])):
-		y = int(agg_height_map[xc, zc])
-		x, z = (xc << 4), (zc << 4)
-		new_level_array[x:x+16, z:z+16, y] = materials.alphaMaterials.Brick.ID
-	return new_level_array
-
-
-def store_level(level_array, name="level"):
-	d = {"level_array": level_array}
-	dill.dump(d, open(name + ".pickle", "wb"))
-
-
-def load_level(name="level"):
-	d = dill.load(open(name + ".pickle", "rb"))
-	return d["level_array"]
 
 
 if __name__ == '__main__':

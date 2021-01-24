@@ -3,6 +3,15 @@ from typing import Tuple, cast
 
 from pymclevel import materials
 from village_generation.conversion.np_mc import build_level_array, export_level
+from village_generation.edit_level.edit_level import place_house
+from village_generation.support.utils import traverse_diagonally
+
+
+displayName = "Build House"
+inputs = (
+	("Build House", "label"),
+	("Creator: Pluralis", "label"),
+)
 
 template = np.array(
 	[
@@ -78,32 +87,16 @@ def perform(level, box, options):
 	level_array = build_level_array(level, box)
 
 	house_slice = cast(Tuple[slice, slice, slice], tuple(slice(0, s) for s in template.shape))
-	new_level_array = _place_house(level_array.copy(), house_slice, materials.alphaMaterials.WoodPlanks.ID)
+	new_level_array = place_house(level_array.copy(), template, house_slice, materials.alphaMaterials.WoodPlanks.ID)
 
 	export_level(level, box, new_level_array, level_array)
 
 
-def __traverse_diagonally(rectangle):
-	x_min, x_max, y_min, y_max = rectangle
-	width, height = x_max - x_min + 1, y_max - y_min + 1
-	n_diagonals = width + height - 1
-	for diagonal in range(n_diagonals):
-		for offset in range(min(width, height, diagonal + 1, n_diagonals - diagonal)):
-			dx, dy = max(diagonal - (height - 1), 0) + offset, min(diagonal, height - 1) - offset
-			yield x_min + dx, y_min + dy
-
-
-def _determine_height(surface_height_map, house_slice):
+def _determine_house_height(surface_height_map, house_slice):
 	# type: (np.ndarray, Tuple[slice, slice]) -> int
 	heights = surface_height_map[house_slice[0].start:house_slice[0].stop,
 			  house_slice[1].start:house_slice[1].stop]
 	return heights.min()
-
-
-def _place_house(level_array, house_slice, material = materials.alphaMaterials.WoodPlanks.ID):
-	# type: (np.ndarray, Tuple[slice, slice, slice], int) -> np.ndarray
-	level_array[house_slice] = template * material
-	return level_array
 
 
 def fill_with_houses(level_array, build_map, surface_height_map):
@@ -123,14 +116,15 @@ def fill_with_houses(level_array, build_map, surface_height_map):
 
 	subrectangle = __grab_subrectangle(build_map)
 
-	for chunk_coord in __traverse_diagonally(subrectangle):
+	for chunk_coord in traverse_diagonally(subrectangle):
 		if build_map[chunk_coord[0], chunk_coord[1]]:
 			coord = chunk_coord[0] << 4, chunk_coord[1] << 4  # Builds houses at the north-western corner of a chunk
 			house_slice = slice(coord[0], coord[0] + template.shape[0]), \
 						  slice(coord[1], coord[1] + template.shape[1])
-			floor = _determine_height(surface_height_map, house_slice)
-			new_level_array = _place_house(new_level_array,
-										   house_slice + (slice(floor, floor + template.shape[2]),))
+			floor = _determine_house_height(surface_height_map, house_slice)
+			new_level_array = place_house(new_level_array,
+										  template,
+										  house_slice + (slice(floor, floor + template.shape[2]),))
 	return new_level_array
 
 

@@ -1,3 +1,6 @@
+"""Interpreters tend to classify parts of objects (or entire objects) to serve as a more understandable input for
+village generating algorithms and procedures. Currently only interpreters that transform a Minecraft level to numpy
+exist."""
 from abc import ABCMeta, abstractmethod
 
 import numpy as np

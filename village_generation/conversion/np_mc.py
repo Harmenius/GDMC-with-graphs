@@ -3,7 +3,7 @@ from collections import namedtuple
 import numpy as np
 
 from pymclevel import MCInfdevOldLevel, BoundingBox
-from village_generation.interpreter.interpreter import RawLevelChunkInterpreter
+from village_generation.interpret.interpreter import RawLevelChunkInterpreter
 
 Coord = namedtuple('Coord', 'x z y')
 

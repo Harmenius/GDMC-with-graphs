@@ -64,7 +64,7 @@ images (1/2/4/8 bit).  Adam7 interlacing is supported for reading and
 writing.  A number of optional chunks can be specified (when writing)
 and understood (when reading): ``tRNS``, ``bKGD``, ``gAMA``.
 
-For help, type ``import png; help(png)`` in your python interpreter.
+For help, type ``import png; help(png)`` in your python interpret.
 
 A good place to start is the :class:`Reader` and :class:`Writer` classes.
 
