@@ -7,8 +7,9 @@ from typing import Tuple, List, Callable
 from create_house import fill_with_houses
 from mcplatform import *
 from pymclevel import BoundingBox, MCInfdevOldLevel, materials
+from village_generation.conversion.np_mc import build_level_array, export_level
 from village_generation.interpreter.convolution import Convolution, ConvolutionInterpreter, FunctionConvolution
-from village_generation.interpreter.interpreter import RawLevelChunkInterpreter, Interpreter
+from village_generation.interpreter.interpreter import Interpreter
 
 inputs = (
 	("Interpret Level", "label"),
@@ -119,13 +120,6 @@ def _clone_level(level):
 	return new_level
 
 
-def _build_level_array(level, box):
-	# type: (MCInfdevOldLevel, BoundingBox) -> np.ndarray
-	interpreter = RawLevelChunkInterpreter()
-	array = interpreter.interpret(level, box)
-	return array
-
-
 def _neighbor_coords(
 		coord  # type: Tuple[int, int]
 ):
@@ -180,6 +174,12 @@ def find_largest_buildable_area(
 
 
 # TODO: make level / box shape agnostic
+def _change_level(level_array, build_map, surface_height_map):
+	# type: (np.ndarray, np.ndarray, np.ndarray) -> np.ndarray
+	level_array = fill_with_houses(level_array, build_map, surface_height_map)
+	return set_chunk_height_with_bricks(100 * build_map, level_array)
+
+
 def perform(level, box, options):
 	"""
 
@@ -188,12 +188,13 @@ def perform(level, box, options):
 		box (BoundingBox): Box that limits where the village can be placed
 		options (dict): Options given to the Filter from MCEdit2
 	"""
-	level_array = _build_level_array(level, box)
+	level_array = build_level_array(level, box)
 
 	build_map, surface_height_map = _perform(level_array)
+	new_level_array = _change_level(level_array, build_map, surface_height_map)
 
-	fill_with_houses(level, box, options, build_map, surface_height_map)
-	set_chunk_height_with_bricks(100 * build_map, box, level)
+	export_level(level, box, new_level_array, level_array)
+
 
 
 def _perform(level_array):
@@ -403,14 +404,14 @@ def set_column_height_with_bricks(
 		level.setBlockDataAt(x, v, z, 0)
 
 
-def set_chunk_height_with_bricks(agg_height_map, box, level):
+def set_chunk_height_with_bricks(agg_height_map, level_array):
+	# type: (np.ndarray, np.ndarray) -> np.ndarray
+	new_level_array = level_array.copy()
 	for xc, zc in itertools.product(xrange(agg_height_map.shape[0]), xrange(agg_height_map.shape[1])):
 		y = int(agg_height_map[xc, zc])
-		xc, zc = (xc << 4) + box.minx, (zc << 4) + box.minz
-		for x in range(16):
-			for z in range(16):
-				level.setBlockAt(xc + x, y, zc + z, level.materials.Brick.ID)
-				level.setBlockDataAt(xc + x, y, zc + z, 0)
+		x, z = (xc << 4), (zc << 4)
+		new_level_array[x:x+16, z:z+16, y] = materials.alphaMaterials.Brick.ID
+	return new_level_array
 
 
 def store_level(level_array, name="level"):
@@ -425,4 +426,5 @@ def load_level(name="level"):
 
 if __name__ == '__main__':
 	level_array_, = load_level()
-	build_map, surface_height_map_ = _perform(level_array_)
+	build_map_, surface_height_map_ = _perform(level_array_)
+	new_level_array_ = _change_level(level_array_, build_map_, surface_height_map_)
