@@ -1,5 +1,6 @@
 """Functions using a Convolution to interpret a tensor"""
 import numpy as np
+from typing import Callable, Iterable
 
 from village_generation.convolution.convolution import FunctionConvolution, ConvolutionInterpreter
 from village_generation.interpret.level_interpreter import MaterialCountConvolution
@@ -40,12 +41,12 @@ def aggregate_height_per_chunk(height_map, aggregator=np.mean, r=16):
 	return ConvolutionInterpreter(c, (r, r)).interpret(height_map)
 
 
-def _calculate_material_counts(level, material, search_depth, search_height):
-	# TODO: Assumes centered level so _perform has to center sliced_level, making it almost twice as big
-	#  make this not assume centered and revert level slicer
-	level_height = level.shape[2]
-	search_bounds = slice(level_height / 2 - search_depth,
-						  level_height / 2 + 1 + search_height)  # TODO: handle odd level_height
+def calculate_material_counts(level, material, search_depth, search_height, surface_height=None):
+	# type: (np.ndarray, Iterable[int], int, int, int) -> np.ndarray
+	if surface_height is None:
+		surface_height = level.shape[2] / 2
+	search_bounds = slice(surface_height - search_depth,
+						  surface_height + 1 + search_height)
 	material_count_convolution = MaterialCountConvolution(material, search_bounds, (16, 16, level.shape[2]))
 	count_interpreter = ConvolutionInterpreter(material_count_convolution, (16, 16, 1))
 	material_scores = count_interpreter.interpret(level)

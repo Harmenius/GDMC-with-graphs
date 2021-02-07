@@ -1,5 +1,6 @@
 """Contains Interpreter subclasses that are applied directly to 3D numpy arrays representing minecraft levels"""
 import numpy as np
+from typing import Iterable, Tuple
 
 from pymclevel import materials
 from village_generation.convolution.convolution import Convolution
@@ -59,10 +60,11 @@ class TopHeightInterpreter(HeightInterpreter):
 
 class MaterialCountConvolution(Convolution):
 	def __init__(self, material, bounds, convolution_shape):
+		# type: (Iterable[int], slice, Tuple[int, ...]) -> MaterialCountConvolution
 		"""
 
 		Args:
-			material (Iterable[Block]): Materials to count
+			material (Iterable[int]): Materials to count
 			bounds (slice): Slice within column to count the materials in
 			convolution_shape: Shape of array expected as first parameter to call
 		"""
@@ -71,4 +73,5 @@ class MaterialCountConvolution(Convolution):
 		self.bounds = bounds  # TODO: Is 1D now, generify to ND?
 
 	def __call__(self, arr):
+		# type: (np.ndarray) -> np.ndarray
 		return np.isin(arr[:, :, self.bounds], self.material).sum()

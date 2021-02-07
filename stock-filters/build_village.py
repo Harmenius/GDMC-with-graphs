@@ -1,11 +1,11 @@
 import numpy as np
-from typing import Tuple, List
+from typing import Tuple, List, Union
 
 from create_house import fill_with_houses
 from pymclevel import BoundingBox, MCInfdevOldLevel, materials
 from village_generation.conversion.np_mc import build_level_array, export_level
 from village_generation.convolution.functions import spread_scores_over_map, calculate_relief_map, \
-	_calculate_material_counts
+	calculate_material_counts
 from village_generation.edit_level.edit_level import set_chunk_height_with_bricks
 from village_generation.interpret.level_interpreter import SurfaceHeightInterpreter, TopHeightInterpreter
 from village_generation.support.serialisation import load_level
@@ -121,27 +121,24 @@ def _perform(level_array):
 	relief_map = calculate_relief_map(surface_height_map)  # type: np.ndarray
 	centered_level = center_level(level_array, surface_height_map)
 	top_height = TopHeightInterpreter().interpret(centered_level).max()
-	sliced_level = _slice_relevant_level(centered_level, top_height)
-	build_coords = find_buildable_area(relief_map, sliced_level, n=100)
+	sliced_level, surface_height = _slice_relevant_level(centered_level, top_height)
+	build_coords = find_buildable_area(relief_map, sliced_level, surface_height, n=100)
 	village_area = find_largest_buildable_area(relief_map, build_coords)
 	return village_area, surface_height_map
 
 
-def _slice_relevant_level(level, top_height, surface_height_map=None, pad_depth=10, pad_height=10, keep_centered=True):
-	# type: (np.ndarray, int, np.ndarray, int, int, bool) -> np.ndarray
+def _slice_relevant_level(level, top_height, surface_height_map=None, pad_depth=10, pad_height=10):
+	# type: (np.ndarray, int, np.ndarray, int, int) -> Tuple[np.ndarray, int]
 	"""Reduce level size by grabbing a vertical slice from the lowest surface to the highest surface plus padding"""
 	if surface_height_map is None:
 		surface_height = level.shape[2] // 2
 	else:
 		surface_height = surface_height_map.min()
-	if keep_centered:  # Currently required to support _calculate_material_counts, which assumes a centered level
-		depth = surface_height - (top_height - surface_height) - pad_depth
-	else:
-		depth = surface_height - pad_depth
-	return level[:, :, depth: top_height + pad_height]
+	depth = surface_height - pad_depth
+	return level[:, :, depth: top_height + pad_height], pad_depth
 
 
-def _calculate_clear_scores(level):
+def _calculate_clear_scores(level, surface_height):
 	material = [
 		materials.alphaMaterials.Sapling.ID,
 		materials.alphaMaterials.Water.ID,
@@ -153,13 +150,13 @@ def _calculate_clear_scores(level):
 		materials.alphaMaterials.Cactus.ID,
 		materials.alphaMaterials.MobHead.ID,
 	]
-	counts = _calculate_material_counts(level, material, 1, 10)
+	counts = calculate_material_counts(level, material, 1, 10, surface_height=surface_height)
 	return 10 - np.clip((counts / 5).astype(int), 0, 10)
 
 
-def _calculate_flatness_scores(relief_map, level):
+def _calculate_flatness_scores(relief_map, level, surface_height):
 	relief_scores = _calculate_relief_scores(relief_map)
-	clear_scores = _calculate_clear_scores(level)
+	clear_scores = _calculate_clear_scores(level, surface_height)
 	return np.minimum(relief_scores, clear_scores)
 
 
@@ -175,18 +172,16 @@ def _calculate_relief_scores(relief_map):
 	return area_map
 
 
-def _calculate_resource_scores(level):
-	tree_scores = _calculate_tree_scores(level)
-	rock_scores = _calculate_rock_scores(level)
+def _calculate_resource_scores(level, surface_height):
+	tree_scores = _calculate_tree_scores(level, surface_height)
+	rock_scores = _calculate_rock_scores(level, surface_height)
 	return np.maximum(tree_scores, rock_scores) + np.minimum(tree_scores, rock_scores) / 2
 
 
 # TODO: do on a block level or convolve a house-sized space, not per chunk
 def find_buildable_area(
-		relief_map,  # type: np.ndarray
-		level,  # type: np.ndarray
-		n=None
-):
+		relief_map, level, surface_height, n=None):
+	# type: (np.ndarray, np.ndarray, int, int) -> Union[np.ndarray, Tuple[Tuple[int, ...], Tuple[int, ...]]]
 	"""Find all areas where the first buildings will be made
 
 	The algorithm attributes scores to every chunk
@@ -200,42 +195,42 @@ def find_buildable_area(
 	If n is None (default), return scores for all chunks in a grid shape
 	If n is an integer, return a 2xn tuple with coordinates of the top n chunks (order not guaranteed)
 	"""
-	relief_scores = _calculate_flatness_scores(relief_map, level)
+	relief_scores = _calculate_flatness_scores(relief_map, level, surface_height)
 	# TODO: make buildable score, e.g. no trees, water, etc
 	# TODO: water scores is transposed from the original ones. How to handle?
 	# TODO: Bonus points for rivers and lakes (connected body of water of at least X squares)
 	# TODO: Extra bonus points if rivers and lakes hit the or multiple edges (trade route)
-	water_scores = _calculate_water_scores(level)
-	resource_scores = _calculate_resource_scores(level)
+	water_scores = _calculate_water_scores(level, surface_height)
+	resource_scores = _calculate_resource_scores(level, surface_height)
 
 	scores = relief_scores.T + water_scores.T + resource_scores.T
 	scores = np.argsort(scores, axis=None)
 	if n is not None:
-		return np.unravel_index(scores[:n], relief_scores.shape)
+		return np.unravel_index(scores[:n	], relief_scores.shape)
 	# TODO: investigate: find biggest rectangle that fits within True chunks for every cutoff, find optimal point on
 	#  this curve (hopefully it is a sigmoid)
 	return scores
 
 
-def _calculate_water_scores(level):
+def _calculate_water_scores(level, surface_height):
 	water = [materials.alphaMaterials.Water.ID, materials.alphaMaterials.WaterActive.ID]
-	return _calculate_material_scores(level, water, 60, 5)
+	return _calculate_material_scores(level, water, 60, 5, surface_height)
 
 
-def _calculate_tree_scores(level):
+def _calculate_tree_scores(level, surface_height):
 	trees = [materials.alphaMaterials.Wood.ID]
-	return _calculate_material_scores(level, trees, 9, 0, 1)
+	return _calculate_material_scores(level, trees, 9, 0, 1, surface_height)
 
 
-def _calculate_rock_scores(level):
+def _calculate_rock_scores(level, surface_height):
 	ores = (materials.alphaMaterials.GoldOre.ID,
 			materials.alphaMaterials.IronOre.ID,
 			materials.alphaMaterials.CoalOre.ID)
-	return _calculate_material_scores(level, ores, 10, 5)
+	return _calculate_material_scores(level, ores, 10, 5, surface_height)
 
 
-def _calculate_material_scores(level, material, blocks_needed, search_depth, search_height=0):
-	material_scores = _calculate_material_counts(level, material, search_depth, search_height)
+def _calculate_material_scores(level, material, blocks_needed, search_depth, surface_height, search_height=0):
+	material_scores = calculate_material_counts(level, material, search_depth, search_height, surface_height)
 	material_scores = np.greater_equal(material_scores, blocks_needed)
 
 	material_scores = material_scores.astype(int) * 10  # Calculate closeness to trees (10 - manhattan distance)
@@ -245,6 +240,6 @@ def _calculate_material_scores(level, material, blocks_needed, search_depth, sea
 
 
 if __name__ == '__main__':
-	level_array_, = load_level()
+	level_array_ = load_level()
 	build_map_, surface_height_map_ = _perform(level_array_)
 	new_level_array_ = _change_level(level_array_, build_map_, surface_height_map_)

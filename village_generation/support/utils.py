@@ -1,3 +1,6 @@
+from typing import Tuple, Iterator
+
+
 def traverse_diagonally(rectangle):
 	# type: (Tuple[int, int, int, int]) -> Iterator[Tuple[int, int]]
 	"""Iterate over coordinates within rectangle diagonally
