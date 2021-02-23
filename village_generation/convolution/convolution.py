@@ -8,6 +8,7 @@ import itertools
 from abc import ABCMeta, abstractmethod
 
 import numpy as np
+from typing import Callable, Tuple, TypeVar, Optional, Any
 
 from village_generation.interpret.interpreter import Interpreter
 
@@ -23,21 +24,29 @@ class Convolution:
 		pass
 
 
+T = TypeVar("T")
+T_ = TypeVar("T_")
+
+
 class FunctionConvolution(Convolution):
+	"""Convolution that simply applies function to the input array"""
 	def __init__(self, function, convolution_shape):
+		# type: (Callable[[T], T_], Tuple[int, ...]) -> FunctionConvolution
 		super(FunctionConvolution, self).__init__(convolution_shape)
 		self.function = function
 
 	def __call__(self, arr):
+		# type: (T) -> T_
 		return self.function(arr)
 
 
 class ConvolutionInterpreter(Interpreter):
 	def __init__(self, convolution, step_size=None):
+		# type: (Convolution, Optional[Tuple, ...]) -> ConvolutionInterpreter
 		"""
 
 		Args:
-			convolution: callable which takes an x0 x x1 x ... xn sized np.ndarray and returns a single value
+			convolution: Convolution (callable) which takes an x0 x x1 x ... xn sized np.ndarray and returns a single value
 			step_size (tuple): optional n-length tuple with the step size for each dimension
 		"""
 		if step_size is None:
@@ -50,6 +59,7 @@ class ConvolutionInterpreter(Interpreter):
 		self.convolution_shape = convolution.convolution_shape
 
 	def interpret(self, obj):
+		# type: (np.ndarray) -> np.ndarray
 		"""
 		Apply convolution to each subsection of obj
 
@@ -64,7 +74,7 @@ class ConvolutionInterpreter(Interpreter):
 		shape = obj.shape
 		assert len(shape) == len(self.convolution_shape), "Convolution input and object have different dimensionality"
 		output_shape = tuple([(s-c)/ss + 1 for s, c, ss in zip(shape, self.convolution_shape, self.step_size)])
-		output_shape = tuple([d for d in output_shape if d != 1])  # 1-width dimensions is no dimension
+		# output_shape = tuple([d for d in output_shape if d != 1])  # 1-width dimensions is no dimension
 		output = np.empty(output_shape)
 
 		for out_coord in itertools.product(*[xrange(n) for n in output_shape]):

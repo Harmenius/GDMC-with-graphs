@@ -11,3 +11,4 @@ pillow
 ipdb
 typing
 dill
+pytest
